@@ -8,92 +8,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath
-
-
-class FeatureResizer(nn.Module):
-    """
-    This class takes as input a set of embeddings of dimension C1 and outputs a set of
-    embedding of dimension C2, after a linear transformation, dropout and normalization (LN).
-    """
-
-    def __init__(self, input_feat_size, output_feat_size, dropout, do_ln=True):
-        super().__init__()
-        self.do_ln = do_ln
-        # Object feature encoding
-        self.fc = nn.Linear(input_feat_size, output_feat_size, bias=True)
-        self.layer_norm = nn.LayerNorm(output_feat_size, eps=1e-12)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, encoder_features):
-        x = self.fc(encoder_features)
-        if self.do_ln:
-            x = self.layer_norm(x)
-        output = self.dropout(x)
-        return output
-
-
-def l1norm(X, dim, eps=1e-8):
-    """L1-normalize columns of X"""
-    norm = torch.abs(X).sum(dim=dim, keepdim=True) + eps
-    X = torch.div(X, norm)
-    return X
-
-
-def l2norm(X, dim, eps=1e-8):
-    """L2-normalize columns of X"""
-    norm = torch.pow(X, 2).sum(dim=dim, keepdim=True).sqrt() + eps
-    X = torch.div(X, norm)
-    return X
-
-
-def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-8):
-    """
-    query: (n_context, queryL, d)
-    context: (n_context, sourceL, d)
-    """
-    batch_size_q, queryL = query.size(0), query.size(1)
-    batch_size, sourceL = context.size(0), context.size(1)
-
-    # Get attention
-    # --> (batch, d, queryL)
-    queryT = torch.transpose(query, 1, 2)
-
-    # (batch, sourceL, d)(batch, d, queryL)
-    # --> (batch, sourceL, queryL)
-    attn = torch.bmm(context, queryT)
-    if raw_feature_norm == "softmax":
-        # --> (batch*sourceL, queryL)
-        attn = attn.view(batch_size * sourceL, queryL)
-        attn = nn.Softmax()(attn)
-        # --> (batch, sourceL, queryL)
-        attn = attn.view(batch_size, sourceL, queryL)
-    elif raw_feature_norm == "l2norm":
-        attn = l2norm(attn, 2)
-    elif raw_feature_norm == "clipped_l2norm":
-        attn = nn.LeakyReLU(0.1)(attn)
-        attn = l2norm(attn, 2)
-    else:
-        raise ValueError("unknown first norm type:", raw_feature_norm)
-    # --> (batch, queryL, sourceL)
-    attn = torch.transpose(attn, 1, 2).contiguous()
-    # --> (batch*queryL, sourceL)
-    attn = attn.view(batch_size * queryL, sourceL)
-    attn = nn.Softmax()(attn * smooth)
-    # --> (batch, queryL, sourceL)
-    attn = attn.view(batch_size, queryL, sourceL)
-    # --> (batch, sourceL, queryL)
-    attnT = torch.transpose(attn, 1, 2).contiguous()
-
-    # --> (batch, d, sourceL)
-    contextT = torch.transpose(context, 1, 2)
-    # (batch x d x sourceL)(batch x sourceL x queryL)
-    # --> (batch, d, queryL)
-    weightedContext = torch.bmm(contextT, attnT)
-    # --> (batch, queryL, d)
-    weightedContext = torch.transpose(weightedContext, 1, 2)
-
-    return weightedContext, attnT
+from timm.layers import DropPath
 
 
 class BiMultiHeadAttention(nn.Module):
@@ -127,7 +42,11 @@ class BiMultiHeadAttention(nn.Module):
         self._reset_parameters()
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
@@ -171,7 +90,9 @@ class BiMultiHeadAttention(nn.Module):
         value_l_states = value_l_states.view(*proj_shape)
 
         src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
+        attn_weights = torch.bmm(
+            query_states, key_states.transpose(1, 2)
+        )  # bs*nhead, nimg, ntxt
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
@@ -191,7 +112,9 @@ class BiMultiHeadAttention(nn.Module):
             )  # Do not increase 50000, data type half has quite limited range
 
         attn_weights_T = attn_weights.transpose(1, 2)
-        attn_weights_l = attn_weights_T - torch.max(attn_weights_T, dim=-1, keepdim=True)[0]
+        attn_weights_l = (
+            attn_weights_T - torch.max(attn_weights_T, dim=-1, keepdim=True)[0]
+        )
         if self.clamp_min_for_underflow:
             attn_weights_l = torch.clamp(
                 attn_weights_l, min=-50000
@@ -204,7 +127,9 @@ class BiMultiHeadAttention(nn.Module):
         # mask vison for language
         if attention_mask_v is not None:
             attention_mask_v = (
-                attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
+                attention_mask_v[:, None, None, :]
+                .repeat(1, self.num_heads, 1, 1)
+                .flatten(0, 1)
             )
             attn_weights_l.masked_fill_(attention_mask_v, float("-inf"))
 
@@ -213,7 +138,9 @@ class BiMultiHeadAttention(nn.Module):
         # mask language for vision
         if attention_mask_l is not None:
             attention_mask_l = (
-                attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
+                attention_mask_l[:, None, None, :]
+                .repeat(1, self.num_heads, 1, 1)
+                .flatten(0, 1)
             )
             attn_weights.masked_fill_(attention_mask_l, float("-inf"))
         attn_weights_v = attn_weights.softmax(dim=-1)
@@ -275,13 +202,21 @@ class BiAttentionBlock(nn.Module):
         self.layer_norm_v = nn.LayerNorm(v_dim)
         self.layer_norm_l = nn.LayerNorm(l_dim)
         self.attn = BiMultiHeadAttention(
-            v_dim=v_dim, l_dim=l_dim, embed_dim=embed_dim, num_heads=num_heads, dropout=dropout
+            v_dim=v_dim,
+            l_dim=l_dim,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
         )
 
         # add layer scale for training stability
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma_v = nn.Parameter(init_values * torch.ones((v_dim)), requires_grad=True)
-        self.gamma_l = nn.Parameter(init_values * torch.ones((l_dim)), requires_grad=True)
+        self.gamma_v = nn.Parameter(
+            init_values * torch.ones((v_dim)), requires_grad=True
+        )
+        self.gamma_l = nn.Parameter(
+            init_values * torch.ones((l_dim)), requires_grad=True
+        )
 
     def forward(self, v, l, attention_mask_v=None, attention_mask_l=None):
         v = self.layer_norm_v(v)
