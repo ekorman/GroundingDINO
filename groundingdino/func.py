@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List
 import torch
 import torch.nn as nn
@@ -5,9 +6,11 @@ from torchvision.ops import box_convert
 from PIL import Image
 from functional_cat.interfaces import ObjectDetector, ImageInput
 from functional_cat.data_types import Detection, BoundingPolygon
+from functional_cat.io import download_to_cache, FileFromURL
 from torchvision.transforms.functional import resize, to_tensor, normalize
 
-from groundingdino.util.inference import preprocess_caption
+
+from groundingdino.util.inference import load_model, preprocess_caption
 from groundingdino.models.GroundingDINO.groundingdino import GroundingDINO
 from groundingdino.util.utils import get_phrases_from_posmap
 
@@ -20,7 +23,7 @@ def transform(img: Image.Image):
 
 
 class Detector(nn.Module):
-    def __init__(self, dino: GroundingDINO, text_prompt, device="cpu"):
+    def __init__(self, dino: GroundingDINO, text_prompt, device):
         super().__init__()
         self.dino = dino
         caption = preprocess_caption(text_prompt)
@@ -33,15 +36,42 @@ class Detector(nn.Module):
 
 
 class FixedDINO(ObjectDetector):
-    def __init__(self, text_prompt, dino, box_threshold=0.35, text_threshold=0.25):
+    weights = FileFromURL(
+        url="https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth",
+        md5="075ebfa7242d913f38cb051fe1a128a2",
+    )
+
+    def __init__(
+        self,
+        class_labels: List[str],
+        box_threshold=0.35,
+        text_threshold=0.25,
+        device: str = None,
+    ):
+        weights_path = download_to_cache(self.weights)
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+
+        dino = load_model(
+            Path(__file__).parent / "config" / "GroundingDINO_SwinT_OGC.py",
+            weights_path,
+            device=device,
+        )
+
+        self._class_labels = class_labels
+
+        text_prompt = " . ".join(class_labels) + " ."
+
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
         self.text_prompt = text_prompt
-        self.detector = Detector(dino, text_prompt)
+        self.detector = Detector(dino, text_prompt, device=device)
 
     def __call__(self, imgs: ImageInput, score_thres: float) -> List[List[Detection]]:
         assert len(imgs) == 1
-        img_tensor = torch.stack([transform(img) for img in imgs])
+        img_tensor = torch.stack([transform(img) for img in imgs]).to(self.device)
         with torch.no_grad():
             out = self.detector(img_tensor)
         prediction_logits = out["pred_logits"].cpu().sigmoid()[0]
