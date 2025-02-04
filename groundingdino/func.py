@@ -29,7 +29,7 @@ class Detector(nn.Module):
         caption = preprocess_caption(text_prompt)
 
         text_dict = dino._process_text(caption, device=device)
-        self._text_dict = {k: v.detach().to(device) for k, v in text_dict.items()}
+        self._text_dict = {k: v.detach() for k, v in text_dict.items()}
 
     def forward(self, image):
         return self.dino.process_image(image, self._text_dict)
@@ -58,7 +58,9 @@ class FixedDINO(ObjectDetector):
             Path(__file__).parent / "config" / "GroundingDINO_SwinT_OGC.py",
             weights_path,
             device=device,
-        )
+        ).to(
+            device
+        )  # looks like `load_model` doesn't place it on device??
 
         self._class_labels = class_labels
 
@@ -109,4 +111,4 @@ class FixedDINO(ObjectDetector):
 
     @property
     def class_labels(self) -> List[str]:
-        return [s for s in self.text_prompt.replace(" ", "").split(".") if s != ""]
+        return self._class_labels
