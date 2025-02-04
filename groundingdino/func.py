@@ -29,7 +29,7 @@ class Detector(nn.Module):
         caption = preprocess_caption(text_prompt)
 
         text_dict = dino._process_text(caption, device=device)
-        self._text_dict = {k: v.detach() for k, v in text_dict.items()}
+        self._text_dict = {k: v.detach().to(device) for k, v in text_dict.items()}
 
     def forward(self, image):
         return self.dino.process_image(image, self._text_dict)
