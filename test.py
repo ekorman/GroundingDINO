@@ -107,13 +107,16 @@ class FixedDINO(ObjectDetector):
 
 def run_func():
     img = Image.open(IMAGE_PATH).convert("RGB")
-    detector = FixedDino(TEXT_PROMPT)
+
+    detector = FixedDINO(TEXT_PROMPT)
+    start = time.time()
     dets = detector([img], 0.5)[0]
+    print(f"functional inference time: {time.time() - start}")
     print("functional output: ", dets)
 
-    for det in dets:
-        img = det.draw_on_image(img)
-    img.show()
+    # for det in dets:
+    #     img = det.draw_on_image(img)
+    # img.show()
 
 
 def run_detector():
