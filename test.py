@@ -1,5 +1,3 @@
-import numpy as np
-import torch
 from groundingdino.util.inference import load_model, predict
 
 from PIL import Image
@@ -22,14 +20,14 @@ TEXT_TRESHOLD = 0.25
 image = Image.open(IMAGE_PATH).convert("RGB")
 
 
-def new_transform(img: Image.Image):
+def transform(img: Image.Image):
     ret = resize(img, [800], max_size=1333)
     ret = to_tensor(ret)
     ret = normalize(ret, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     return ret
 
 
-proc_image = new_transform(image)
+proc_image = transform(image)
 
 boxes, logits, phrases = predict(
     model=model,
