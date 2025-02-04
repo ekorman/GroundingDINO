@@ -228,34 +228,14 @@ class GroundingDINO(nn.Module):
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, self.query_dim)
 
-    def forward(self, samples: NestedTensor, targets: List = None, **kw):
-        """The forward expects a NestedTensor, which consists of:
-           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-
-        It returns a dict with the following elements:
-           - "pred_logits": the classification logits (including no-object) for all queries.
-                            Shape= [batch_size x num_queries x num_classes]
-           - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                           (center_x, center_y, width, height). These values are normalized in [0, 1],
-                           relative to the size of each individual image (disregarding possible padding).
-                           See PostProcess for information on how to retrieve the unnormalized bounding box.
-           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                            dictionnaries containing the two above keys for each decoder layer.
-        """
-        if targets is None:
-            captions = kw["captions"]
-        else:
-            captions = [t["caption"] for t in targets]
-
-        # encoder texts
+    def _process_text(self, captions, device):
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(
-            samples.device
+            device
         )
         (
             text_self_attention_masks,
             position_ids,
-            cate_to_token_mask_list,
+            _,
         ) = generate_masks_with_special_tokens_and_transfer_map(
             tokenized, self.specical_tokens, self.tokenizer
         )
@@ -301,18 +281,35 @@ class GroundingDINO(nn.Module):
                 :, : self.max_text_len, : self.max_text_len
             ]
 
-        text_dict = {
+        return {
             "encoded_text": encoded_text,  # bs, 195, d_model
             "text_token_mask": text_token_mask,  # bs, 195
             "position_ids": position_ids,  # bs, 195
             "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
         }
 
-        # import ipdb; ipdb.set_trace()
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-        if not hasattr(self, "features") or not hasattr(self, "poss"):
-            self.set_image_tensor(samples)
+    def forward(self, samples: NestedTensor, captions):
+        """The forward expects a NestedTensor, which consists of:
+           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+
+        It returns a dict with the following elements:
+           - "pred_logits": the classification logits (including no-object) for all queries.
+                            Shape= [batch_size x num_queries x num_classes]
+           - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                           (center_x, center_y, width, height). These values are normalized in [0, 1],
+                           relative to the size of each individual image (disregarding possible padding).
+                           See PostProcess for information on how to retrieve the unnormalized bounding box.
+           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                            dictionnaries containing the two above keys for each decoder layer.
+        """
+
+        # encoder texts
+        text_dict = self._process_text(captions, samples.device)
+
+        samples = nested_tensor_from_tensor_list(samples)
+
+        self.set_image_tensor(samples)
 
         srcs = []
         masks = []
@@ -337,8 +334,8 @@ class GroundingDINO(nn.Module):
                 masks.append(mask)
                 self.poss.append(pos_l)
 
-        input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+        input_query_bbox = input_query_label = attn_mask = None
+        hs, reference, _, __, ___ = self.transformer(
             srcs,
             masks,
             input_query_bbox,
@@ -350,8 +347,8 @@ class GroundingDINO(nn.Module):
 
         # deformable-detr-like anchor update
         outputs_coord_list = []
-        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
-            zip(reference[:-1], self.bbox_embed, hs)
+        for layer_ref_sig, layer_bbox_embed, layer_hs in zip(
+            reference[:-1], self.bbox_embed, hs
         ):
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
@@ -368,20 +365,8 @@ class GroundingDINO(nn.Module):
         )
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
 
-        # # for intermediate outputs
-        # if self.aux_loss:
-        #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
+        self.unset_image_tensor()
 
-        # # for encoder output
-        # if hs_enc is not None:
-        #     # prepare intermediate outputs
-        #     interm_coord = ref_enc[-1]
-        #     interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
-        #     out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
-        #     out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
-        unset_image_tensor = kw.get("unset_image_tensor", True)
-        if unset_image_tensor:
-            self.unset_image_tensor()  ## If necessary
         return out
 
     @torch.jit.unused
