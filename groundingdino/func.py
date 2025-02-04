@@ -28,11 +28,14 @@ class Detector(nn.Module):
         self.dino = dino
         caption = preprocess_caption(text_prompt)
 
-        text_dict = dino._process_text(caption, device=device)
+        with torch.no_grad():
+            text_dict = dino._process_text(caption, device=device)
         self._text_dict = {k: v.detach() for k, v in text_dict.items()}
 
     def forward(self, image):
-        return self.dino.process_image(image, self._text_dict)
+        return self.dino.process_image(
+            image, {k: v.clone() for k, v in self._text_dict.items()}
+        )
 
 
 class FixedDINO(ObjectDetector):
